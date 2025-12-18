@@ -26,6 +26,9 @@ where
     S: Eq + Hash + std::fmt::Debug + Send + Sync + Clone + 'static,
 {
     pub(crate) fn cache_for_address(&self, address: Address) -> PrecompileCache<S> {
+        if let Some(cache) = self.0.get(&address) {
+            return cache.clone();
+        }
         self.0.entry(address).or_default().clone()
     }
 }
