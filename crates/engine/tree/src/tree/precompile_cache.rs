@@ -17,7 +17,7 @@ const MAX_CACHE_SIZE: u32 = 10_000;
 
 /// Stores caches for each precompile.
 #[derive(Debug, Clone, Default)]
-pub struct PrecompileCacheMap<S>(DashMap<Address, PrecompileCache<S>>)
+pub struct PrecompileCacheMap<S>(Arc<DashMap<Address, PrecompileCache<S>>>)
 where
     S: Eq + Hash + std::fmt::Debug + Send + Sync + Clone;
 
