@@ -56,14 +56,17 @@ where
     S: Eq + Hash + std::fmt::Debug + Send + Sync + Clone + 'static,
 {
     fn get(&self, key: &CacheKeyRef<'_, S>) -> Option<CacheEntry> {
-        self.0.lock().get(key).cloned()
+        self.0.try_lock()?.get(key).cloned()
     }
 
     /// Inserts the given key and value into the cache, returning the new cache size.
-    fn insert(&self, key: CacheKey<S>, value: CacheEntry) -> usize {
-        let mut cache = self.0.lock();
-        cache.insert(key, value);
-        cache.len()
+    fn insert(&self, key: CacheKey<S>, value: CacheEntry) -> Option<usize> {
+        if let Some(mut cache) = self.0.try_lock() {
+            cache.insert(key, value);
+            Some(cache.len())
+        } else {
+            None
+        }
     }
 }
 
@@ -208,8 +211,9 @@ where
         match &result {
             Ok(output) => {
                 let key = CacheKey::new(self.spec_id.clone(), Bytes::copy_from_slice(calldata));
-                let size = self.cache.insert(key, CacheEntry(output.clone()));
-                self.set_precompile_cache_size_metric(size as f64);
+                if let Some(size) = self.cache.insert(key, CacheEntry(output.clone())) {
+                    self.set_precompile_cache_size_metric(size as f64);
+                }
                 self.increment_by_one_precompile_cache_misses();
             }
             _ => {
