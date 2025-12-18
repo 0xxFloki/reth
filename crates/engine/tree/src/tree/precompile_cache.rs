@@ -2,11 +2,9 @@
 
 use alloy_primitives::Bytes;
 use dashmap::DashMap;
-use parking_lot::Mutex;
 use reth_evm::precompiles::{DynPrecompile, Precompile, PrecompileInput};
 use revm::precompile::{PrecompileId, PrecompileOutput, PrecompileResult};
 use revm_primitives::Address;
-use schnellru::LruMap;
 use std::{
     hash::{Hash, Hasher},
     sync::Arc,
@@ -38,7 +36,9 @@ where
 /// [`LruMap`] requires a mutable reference on `get` since it updates the LRU order,
 /// so we use a [`Mutex`] instead of an `RwLock`.
 #[derive(Debug, Clone)]
-pub struct PrecompileCache<S>(Arc<Mutex<LruMap<CacheKey<S>, CacheEntry>>>)
+pub struct PrecompileCache<S>(
+    Arc<DashMap<Bytes, CacheEntry<S>, alloy_primitives::map::DefaultHashBuilder>>,
+)
 where
     S: Eq + Hash + std::fmt::Debug + Send + Sync + Clone;
 
@@ -47,7 +47,7 @@ where
     S: Eq + Hash + std::fmt::Debug + Send + Sync + Clone + 'static,
 {
     fn default() -> Self {
-        Self(Arc::new(Mutex::new(LruMap::new(schnellru::ByLength::new(MAX_CACHE_SIZE)))))
+        Self(Default::default())
     }
 }
 
@@ -55,29 +55,14 @@ impl<S> PrecompileCache<S>
 where
     S: Eq + Hash + std::fmt::Debug + Send + Sync + Clone + 'static,
 {
-    fn get(&self, key: &CacheKeyRef<'_, S>) -> Option<CacheEntry> {
-        self.0.try_lock()?.get(key).cloned()
+    fn get(&self, key: &CacheKeyRef<'_, S>) -> Option<CacheEntry<S>> {
+        self.0.get(key.0 .1).filter(|entry| entry.0 .1 == key.0 .0).map(|entry| entry.clone())
     }
 
     /// Inserts the given key and value into the cache, returning the new cache size.
-    fn insert(&self, key: CacheKey<S>, value: CacheEntry) -> Option<usize> {
-        if let Some(mut cache) = self.0.try_lock() {
-            cache.insert(key, value);
-            Some(cache.len())
-        } else {
-            None
-        }
-    }
-}
-
-/// Cache key, spec id and precompile call input. spec id is included in the key to account for
-/// precompile repricing across fork activations.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CacheKey<S>((S, Bytes));
-
-impl<S> CacheKey<S> {
-    const fn new(spec_id: S, input: Bytes) -> Self {
-        Self((spec_id, input))
+    fn insert(&self, key: Bytes, value: CacheEntry<S>) -> Option<usize> {
+        self.0.insert(key, value);
+        Some(self.0.len())
     }
 }
 
@@ -91,12 +76,6 @@ impl<'a, S> CacheKeyRef<'a, S> {
     }
 }
 
-impl<S: PartialEq> PartialEq<CacheKey<S>> for CacheKeyRef<'_, S> {
-    fn eq(&self, other: &CacheKey<S>) -> bool {
-        self.0 .0 == other.0 .0 && self.0 .1 == other.0 .1.as_ref()
-    }
-}
-
 impl<'a, S: Hash> Hash for CacheKeyRef<'a, S> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.0 .0.hash(state);
@@ -106,15 +85,15 @@ impl<'a, S: Hash> Hash for CacheKeyRef<'a, S> {
 
 /// Cache entry, precompile successful output.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CacheEntry(PrecompileOutput);
+pub struct CacheEntry<S>((PrecompileOutput, S));
 
-impl CacheEntry {
+impl<S> CacheEntry<S> {
     const fn gas_used(&self) -> u64 {
-        self.0.gas_used
+        self.0 .0.gas_used
     }
 
     fn to_precompile_result(&self) -> PrecompileResult {
-        Ok(self.0.clone())
+        Ok(self.0 .0.clone())
     }
 }
 
@@ -210,8 +189,10 @@ where
 
         match &result {
             Ok(output) => {
-                let key = CacheKey::new(self.spec_id.clone(), Bytes::copy_from_slice(calldata));
-                if let Some(size) = self.cache.insert(key, CacheEntry(output.clone())) {
+                if let Some(size) = self.cache.insert(
+                    Bytes::copy_from_slice(calldata),
+                    CacheEntry((output.clone(), self.spec_id.clone())),
+                ) {
                     self.set_precompile_cache_size_metric(size as f64);
                 }
                 self.increment_by_one_precompile_cache_misses();
